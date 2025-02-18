@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"os"
 	"sync"
 	"time"
 
@@ -14,6 +15,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
 	_ "github.com/mattn/go-sqlite3" // For QR code rendering
+	"github.com/mdp/qrterminal"
 	"go.mau.fi/whatsmeow"
 	waProto "go.mau.fi/whatsmeow/binary/proto"
 	"go.mau.fi/whatsmeow/store/sqlstore"
@@ -142,25 +144,52 @@ func scanQR(c *gin.Context) {
 			return
 		}
 
-		select {
-		case qrCode := <-qrChan:
-			if qrCode.Event == "code" {
-				encodedQRCode := url.QueryEscape(qrCode.Code)
-				html := `
-                    <!DOCTYPE html>
-                    <html>
-                    <body>
-                        <h1>Scan the QR Code with Your Phone</h1>
-                        <img src="https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=%s">
-                    </body>
-                    </html>
-                `
-				// Replace the placeholder with the URL-encoded QR code data
-				c.Header("Content-Type", "text/html")
-				c.String(http.StatusOK, fmt.Sprintf(html, encodedQRCode))
-			} else if qrCode.Event == "timeout" {
-				c.JSON(http.StatusRequestTimeout, gin.H{"error": "QR code timed out"})
+		qrCode := <-qrChan
+		if qrCode.Event == "code" {
+			// Validate QR code data
+			if qrCode.Code == "" {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "Invalid QR code data"})
+				return
 			}
+
+			// Render QR code in the terminal using qrterminal
+			fmt.Println("Scan this QR code with your phone:")
+			qrterminal.Generate(qrCode.Code, qrterminal.L, os.Stdout) // Use os.Stdout as the writer
+
+			// URL-encode the QR code data to ensure compatibility with the QR server
+			encodedQRCode := url.QueryEscape(qrCode.Code)
+
+			// Serve an HTML page with the QR code
+			html := `
+				<!DOCTYPE html>
+				<html lang="en">
+				<head>
+					<meta charset="UTF-8">
+					<meta name="viewport" content="width=device-width, initial-scale=1.0">
+					<title>Scan QR Code</title>
+					<style>
+						body {
+							font-family: Arial, sans-serif;
+							text-align: center;
+							margin-top: 50px;
+						}
+						img {
+							max-width: 300px;
+							height: auto;
+						}
+					</style>
+				</head>
+				<body>
+					<h1>Scan the QR Code with Your Phone</h1>
+					<img src="https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=%s" alt="QR Code">
+				</body>
+				</html>
+			`
+			// Replace the placeholder with the URL-encoded QR code data
+			c.Header("Content-Type", "text/html")
+			c.String(http.StatusOK, fmt.Sprintf(html, encodedQRCode))
+		} else if qrCode.Event == "timeout" {
+			c.JSON(http.StatusRequestTimeout, gin.H{"error": "QR code timed out"})
 		}
 	} else {
 		c.JSON(http.StatusOK, gin.H{"message": "Already logged in"})
