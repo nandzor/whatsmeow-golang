@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WhatsApp-Like Chat</title>
+    <!-- Include Tailwind CSS via CDN -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        /* Custom scrollbar styling */
+        .scrollbar::-webkit-scrollbar {
+            width: 8px;
+        }
+
+        .scrollbar::-webkit-scrollbar-thumb {
+            background: #cbd5e0;
+            border-radius: 4px;
+        }
+
+        .scrollbar::-webkit-scrollbar-track {
+            background: #f7fafc;
+        }
+    </style>
+</head>
+
+<body class="bg-gray-100 flex items-center justify-center min-h-screen">
+    <div class="w-full max-w-md bg-white shadow-lg rounded-lg overflow-hidden">
+        <!-- Chat Header -->
+        <div class="bg-blue-600 text-white py-4 px-6 flex items-center justify-between">
+            <h1 class="text-lg font-bold">Live Chat</h1>
+            <button class="text-sm font-medium hover:text-blue-300">End Chat</button>
+        </div>
+        <!-- Chat Messages -->
+        <ul id="messages" class="scrollbar h-96 overflow-y-auto p-4 space-y-2">
+            <!-- Messages will be dynamically added here -->
+        </ul>
+        <!-- Chat Input -->
+        <div class="border-t border-gray-200 p-4">
+            <div class="flex items-center space-x-2">
+                <input type="text" id="messageInput" placeholder="Type a message..."
+                    class="flex-grow px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:border-blue-500" />
+                <button id="sendButton"
+                    class="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition duration-200">
+                    Send
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Connect to the WebSocket server
+        const ws = new WebSocket('ws://100.81.120.54:8050/ws');
+
+        // Function to fetch messages from the API
+        async function fetchMessages() {
+            try {
+                const response = await fetch('http://100.81.120.54:8050/receive-message');
+                if (!response.ok) {
+                    throw new Error(`HTTP error! Status: ${response.status}`);
+                }
+                const data = await response.json();
+                const messagesList = document.getElementById('messages');
+                // Clear existing messages (optional: you can append instead of clearing)
+                messagesList.innerHTML = '';
+                // Add fetched messages to the chat
+                data.received_messages.forEach((message) => {
+                    addMessageToChat(message);
+                });
+                // Auto-scroll to the latest message
+                messagesList.scrollTop = messagesList.scrollHeight;
+            } catch (error) {
+                console.error('Error fetching messages:', error);
+            }
+        }
+
+        // Handle incoming WebSocket messages
+        ws.onmessage = function (event) {
+            const message = JSON.parse(event.data);
+            addMessageToChat(message);
+        };
+
+        // Helper function to add a message to the chat UI
+        function addMessageToChat(message) {
+            const messagesList = document.getElementById('messages');
+            const li = document.createElement('li');
+            li.className = `p-3 rounded-lg ${
+                message.sender === 'You' ? 'bg-green-100 self-end ml-auto' : 'bg-gray-100 self-start mr-auto'
+            }`;
+            li.textContent = `${message.sender}: ${message.message} (${message.timestamp})`;
+            messagesList.appendChild(li);
+            // Auto-scroll to the latest message
+            messagesList.scrollTop = messagesList.scrollHeight;
+        }
+
+        // Handle sending messages via REST API
+        const sendButton = document.getElementById('sendButton');
+        const messageInput = document.getElementById('messageInput');
+        sendButton.addEventListener('click', async () => {
+            const messageText = messageInput.value.trim();
+            if (messageText) {
+                const payload = {
+                    recipient: '6282354777001', // Replace with actual recipient logic
+                    message: messageText,
+                };
+                try {
+                    // Send message via REST API
+                    const response = await fetch('http://100.81.120.54:8050/send-message', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                        },
+                        body: JSON.stringify(payload),
+                    });
+                    if (!response.ok) {
+                        throw new Error(`HTTP error! Status: ${response.status}`);
+                    }
+                    // Clear input after sending
+                    messageInput.value = '';
+                } catch (error) {
+                    console.error('Error sending message:', error);
+                }
+            }
+        });
+
+        // Allow pressing "Enter" to send a message
+        messageInput.addEventListener('keypress', (event) => {
+            if (event.key === 'Enter') {
+                sendButton.click();
+            }
+        });
+
+        // Fetch messages every 5 seconds
+        setInterval(fetchMessages, 5000);
+    </script>
+</body>
+
+</html>
