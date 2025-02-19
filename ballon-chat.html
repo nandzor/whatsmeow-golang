@@ -48,6 +48,16 @@
             display: none; /* Initially hidden */
             z-index: 1001; /* Ensure badge is on top of the balloon */
         }
+        .vibrate {
+            animation: vibrate 0.5s ease-in-out;
+        }
+        @keyframes vibrate {
+            0% { transform: translate(0); }
+            25% { transform: translate(-2px, 2px); }
+            50% { transform: translate(2px, -2px); }
+            75% { transform: translate(-2px, 2px); }
+            100% { transform: translate(0); }
+        }
         .chat-window {
             position: fixed;
             bottom: 90px;
@@ -95,9 +105,11 @@
             </div>
         </div>
     </div>
+    <audio id="notificationSound" src="http://8.219.234.252/beep.mp3" preload="auto"></audio>
     <script>
         let unreadMessagesCount = 0;
         let isChatOpen = false;
+		playNotificationSound()
 
         function updateBadge() {
             const badge = document.getElementById('messageBadge');
@@ -109,24 +121,70 @@
             }
         }
 
-        function formatTimestamp(givenTimestamp) {
-            const parseTimestamp = (timestamp) => 
-                new Date(typeof timestamp === 'string' ? timestamp.replace(/\s+[A-Z]{3,4}(\s|$)/, '') : timestamp);
-            const givenDate = parseTimestamp(givenTimestamp);
-            if (isNaN(givenDate.getTime())) {
-                throw new Error('Invalid timestamp format');
-            }
-            const now = new Date();
-            const oneDay = 24 * 60 * 60 * 1000;
-            const timeDiff = now - givenDate;
-            const formatTime = (date) => {
-                const hours = date.getHours();
-                return `${(hours % 12 || 12)}:${date.getMinutes().toString().padStart(2, '0')} ${hours < 12 ? 'AM' : 'PM'}`;
-            };
-            if (timeDiff < oneDay) return `Today at ${formatTime(givenDate)}`;
-            if (timeDiff < 2 * oneDay) return `Yesterday at ${formatTime(givenDate)}`;
-            return `${givenDate.toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric', weekday: 'long' })}, at ${formatTime(givenDate)}`;
+        function playNotificationSound() {
+            const sound = document.getElementById('notificationSound');
+			sound.currentTime = 0; // Reset sound to start
+
+			// Use AudioContext to bypass autoplay restrictions
+			const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+			fetch(sound.src)
+				.then(response => response.arrayBuffer())
+				.then(arrayBuffer => audioContext.decodeAudioData(arrayBuffer))
+				.then(audioBuffer => {
+					const source = audioContext.createBufferSource();
+					source.buffer = audioBuffer;
+					source.connect(audioContext.destination);
+					source.start(0); // Play immediately
+				})
+				.catch(error => console.error('Error loading audio:', error));
         }
+
+        function vibrateChatBalloon() {
+            const chatButton = document.getElementById('chatButton');
+            chatButton.classList.add('vibrate');
+            setTimeout(() => {
+                chatButton.classList.remove('vibrate');
+            }, 500); // Remove the animation after 500ms
+        }
+
+        function formatTimestamp(givenTimestamp) {
+			const parseTimestamp = (timestamp) => 
+				new Date(typeof timestamp === 'string' ? timestamp.replace(/\s+[A-Z]{3,4}(\s|$)/, '') : timestamp);
+			
+			const givenDate = parseTimestamp(givenTimestamp);
+			
+			if (isNaN(givenDate.getTime())) {
+				throw new Error('Invalid timestamp format');
+			}
+			
+			const now = new Date();
+			const oneDay = 24 * 60 * 60 * 1000;
+			
+			// Normalize both dates to the start of the day (midnight)
+			const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+			const startOfGivenDate = new Date(givenDate.getFullYear(), givenDate.getMonth(), givenDate.getDate());
+			
+			const timeDiff = now - givenDate;
+			
+			const formatTime = (date) => {
+				const hours = date.getHours();
+				return `${(hours % 12 || 12)}:${date.getMinutes().toString().padStart(2, '0')} ${hours < 12 ? 'AM' : 'PM'}`;
+			};
+			
+			// Check if the given date is today
+			if (startOfGivenDate.getTime() === startOfToday.getTime()) {
+				return `Today at ${formatTime(givenDate)}`;
+			}
+			
+			// Check if the given date is yesterday
+			const startOfYesterday = new Date(startOfToday.getTime() - oneDay);
+			if (startOfGivenDate.getTime() === startOfYesterday.getTime()) {
+				return `Yesterday at ${formatTime(givenDate)}`;
+			}
+			
+			// Otherwise, return the full date and time
+			return `${givenDate.toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric', weekday: 'long' })}, at ${formatTime(givenDate)}`;
+		}
 
         const ws = new WebSocket('ws://100.81.120.54:8050/ws');
         const currentUser = '6285123945816@s.whatsapp.net'; // Replace with actual current user logic
@@ -150,6 +208,8 @@
             if (message.sender !== currentUser && !isChatOpen) {
                 unreadMessagesCount++;
                 updateBadge();
+                playNotificationSound(); // Play sound for new message
+                vibrateChatBalloon(); // Trigger vibration animation
             }
             addMessageToChat(message);
         };
