@@ -1,6 +1,5 @@
 <!DOCTYPE html>
 <html lang="en">
-
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -10,23 +9,19 @@
         .scrollbar::-webkit-scrollbar {
             width: 6px;
         }
-
         .scrollbar::-webkit-scrollbar-thumb {
             background: #cbd5e0;
             border-radius: 3px;
         }
-
         .scrollbar::-webkit-scrollbar-track {
             background: #f7fafc;
         }
-
         .chat-balloon {
             position: fixed;
             bottom: 20px;
             right: 20px;
             z-index: 1000;
         }
-
         .chat-button {
             width: 60px;
             height: 60px;
@@ -37,8 +32,22 @@
             justify-content: center;
             cursor: pointer;
             box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+            position: relative;
         }
-
+        .badge {
+            position: absolute;
+            top: -8px; /* Move badge slightly above the balloon */
+            right: -8px; /* Move badge slightly outside the balloon */
+            background-color: red;
+            color: white;
+            font-size: 12px;
+            font-weight: bold;
+            padding: 4px 8px;
+            border-radius: 50%;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2); /* Add shadow for better visibility */
+            display: none; /* Initially hidden */
+            z-index: 1001; /* Ensure badge is on top of the balloon */
+        }
         .chat-window {
             position: fixed;
             bottom: 90px;
@@ -54,9 +63,10 @@
         }
     </style>
 </head>
-
 <body class="bg-gray-100">
     <div class="chat-balloon">
+        <!-- Badge Notification -->
+        <div id="messageBadge" class="badge">0</div>
         <div id="chatButton" class="chat-button">
             <svg xmlns="http://www.w3.org/2000/svg" class="h-8 w-8 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 10h.01M12 10h.01M16 10h.01M9 16H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-5l-5 5v-5z" />
@@ -85,29 +95,36 @@
             </div>
         </div>
     </div>
-
     <script>
+        let unreadMessagesCount = 0;
+        let isChatOpen = false;
+
+        function updateBadge() {
+            const badge = document.getElementById('messageBadge');
+            if (unreadMessagesCount > 0 && !isChatOpen) {
+                badge.textContent = unreadMessagesCount;
+                badge.style.display = 'block';
+            } else {
+                badge.style.display = 'none';
+            }
+        }
+
         function formatTimestamp(givenTimestamp) {
             const parseTimestamp = (timestamp) => 
                 new Date(typeof timestamp === 'string' ? timestamp.replace(/\s+[A-Z]{3,4}(\s|$)/, '') : timestamp);
-
             const givenDate = parseTimestamp(givenTimestamp);
             if (isNaN(givenDate.getTime())) {
                 throw new Error('Invalid timestamp format');
             }
-
             const now = new Date();
             const oneDay = 24 * 60 * 60 * 1000;
             const timeDiff = now - givenDate;
-
             const formatTime = (date) => {
                 const hours = date.getHours();
                 return `${(hours % 12 || 12)}:${date.getMinutes().toString().padStart(2, '0')} ${hours < 12 ? 'AM' : 'PM'}`;
             };
-
             if (timeDiff < oneDay) return `Today at ${formatTime(givenDate)}`;
             if (timeDiff < 2 * oneDay) return `Yesterday at ${formatTime(givenDate)}`;
-
             return `${givenDate.toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric', weekday: 'long' })}, at ${formatTime(givenDate)}`;
         }
 
@@ -130,6 +147,10 @@
 
         ws.onmessage = function (event) {
             const message = JSON.parse(event.data);
+            if (message.sender !== currentUser && !isChatOpen) {
+                unreadMessagesCount++;
+                updateBadge();
+            }
             addMessageToChat(message);
         };
 
@@ -159,15 +180,20 @@
         messageInput.addEventListener('keypress', (event) => {
             if (event.key === 'Enter') sendMessage();
         });
+
         chatButton.addEventListener('click', toggleChat);
         closeChat.addEventListener('click', toggleChat);
 
         function toggleChat() {
             if (chatWindow.style.display === 'none' || chatWindow.style.display === '') {
                 chatWindow.style.display = 'flex';
+                isChatOpen = true; // Mark chat as open
+                unreadMessagesCount = 0; // Reset unread count when opening the chat
+                updateBadge();
                 fetchMessages(); // Fetch messages when opening the chat
             } else {
                 chatWindow.style.display = 'none';
+                isChatOpen = false; // Mark chat as closed
             }
         }
 
@@ -200,9 +226,7 @@
 
         // Initialize by fetching messages
         fetchMessages();
-
         //setInterval(fetchMessages, 5000);
     </script>
 </body>
-
 </html>
