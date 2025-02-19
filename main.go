@@ -11,10 +11,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/gin-contrib/cors" // Import CORS middleware
+	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
-	_ "github.com/mattn/go-sqlite3" // For QR code rendering
+	_ "github.com/mattn/go-sqlite3"
 	"github.com/mdp/qrterminal"
 	"go.mau.fi/whatsmeow"
 	waProto "go.mau.fi/whatsmeow/binary/proto"
@@ -25,18 +25,14 @@ import (
 )
 
 var client *whatsmeow.Client
-var receivedMessages []map[string]string
-var messagesMutex sync.Mutex
-
+var db *sql.DB
 var upgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool {
 		return true // Allow all origins (you can customize this for security)
 	},
 }
-
-var wsClients = make(map[*websocket.Conn]bool) // Connected WebSocket clients
+var wsClients = make(map[*websocket.Conn]bool)
 var wsMutex sync.Mutex
-var db *sql.DB
 
 func initDatabase() *sql.DB {
 	db, err := sql.Open("sqlite3", "file:whatsapp.db?_foreign_keys=on")
@@ -44,13 +40,14 @@ func initDatabase() *sql.DB {
 		log.Fatalf("Error opening database: %v", err)
 	}
 
-	// Create the messages table if it doesn't exist
+	// Create the messages table with a unique constraint to prevent duplicates
 	_, err = db.Exec(`
         CREATE TABLE IF NOT EXISTS messages (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             sender TEXT NOT NULL,
             message TEXT NOT NULL,
-            timestamp TEXT NOT NULL
+            timestamp TEXT NOT NULL,
+            UNIQUE(sender, message, timestamp)
         )
     `)
 	if err != nil {
@@ -68,13 +65,13 @@ func handleIncomingMessage(evt *events.Message) {
 	sender := evt.Info.Sender.String()
 	message := evt.Message.GetConversation()
 
-	// Insert the message into the database
+	// Insert or replace the message in the database
 	_, err := db.Exec(`
-        INSERT INTO messages (sender, message, timestamp)
-        VALUES (?, ?, ?)
-    `, sender, message, timestampUTC7)
+        INSERT OR REPLACE INTO messages (id, sender, message, timestamp)
+        VALUES ((SELECT id FROM messages WHERE sender = ? AND message = ?), ?, ?, ?)
+    `, sender, message, sender, message, timestampUTC7)
 	if err != nil {
-		log.Printf("Error inserting message into database: %v", err)
+		log.Printf("Error inserting or replacing message in database: %v", err)
 		return
 	}
 
@@ -130,69 +127,85 @@ func handleWebSocket(c *gin.Context) {
 }
 
 func scanQR(c *gin.Context) {
-	if client.Store.ID == nil {
-		// If not logged in, start the QR code process
-		qrChan, err := client.GetQRChannel(context.Background())
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get QR channel"})
-			return
-		}
-
-		err = client.Connect()
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to connect to WhatsApp"})
-			return
-		}
-
-		qrCode := <-qrChan
-		if qrCode.Event == "code" {
-			// Validate QR code data
-			if qrCode.Code == "" {
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "Invalid QR code data"})
-				return
-			}
-
-			// Render QR code in the terminal using qrterminal
-			fmt.Println("Scan this QR code with your phone:")
-			qrterminal.Generate(qrCode.Code, qrterminal.L, os.Stdout) // Use os.Stdout as the writer
-
-			// URL-encode the QR code data to ensure compatibility with the QR server
-			encodedQRCode := url.QueryEscape(qrCode.Code)
-
-			// Serve an HTML page with the QR code
-			html := `
-				<!DOCTYPE html>
-				<html lang="en">
-				<head>
-					<meta charset="UTF-8">
-					<meta name="viewport" content="width=device-width, initial-scale=1.0">
-					<title>Scan QR Code</title>
-					<style>
-						body {
-							font-family: Arial, sans-serif;
-							text-align: center;
-							margin-top: 50px;
-						}
-						img {
-							max-width: 300px;
-							height: auto;
-						}
-					</style>
-				</head>
-				<body>
-					<h1>Scan the QR Code with Your Phone</h1>
-					<img src="https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=%s" alt="QR Code">
-				</body>
-				</html>
-			`
-			// Replace the placeholder with the URL-encoded QR code data
-			c.Header("Content-Type", "text/html")
-			c.String(http.StatusOK, fmt.Sprintf(html, encodedQRCode))
-		} else if qrCode.Event == "timeout" {
-			c.JSON(http.StatusRequestTimeout, gin.H{"error": "QR code timed out"})
-		}
-	} else {
+	// Check if the user is already logged in
+	if client.Store.ID != nil {
 		c.JSON(http.StatusOK, gin.H{"message": "Already logged in"})
+		return
+	}
+
+	// If not logged in, start the QR code process
+	qrChan, err := client.GetQRChannel(context.Background())
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get QR channel"})
+		return
+	}
+
+	err = client.Connect()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to connect to WhatsApp"})
+		return
+	}
+
+	qrCode := <-qrChan
+	switch qrCode.Event {
+	case "code":
+		// Validate QR code data
+		if qrCode.Code == "" {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Invalid QR code data"})
+			return
+		}
+
+		// Render QR code in the terminal using qrterminal
+		fmt.Println("Scan this QR code with your phone:")
+		qrterminal.Generate(qrCode.Code, qrterminal.L, os.Stdout)
+
+		// URL-encode the QR code data to ensure compatibility with the QR server
+		encodedQRCode := url.QueryEscape(qrCode.Code)
+
+		// Serve an HTML page with the QR code
+		html := `
+            <!DOCTYPE html>
+            <html lang="en">
+            <head>
+                <meta charset="UTF-8">
+                <meta name="viewport" content="width=device-width, initial-scale=1.0">
+                <title>Scan QR Code</title>
+                <style>
+                    body {
+                        font-family: Arial, sans-serif;
+                        text-align: center;
+                        margin-top: 50px;
+                    }
+                    img {
+                        max-width: 300px;
+                        height: auto;
+                    }
+                </style>
+            </head>
+            <body>
+                <h1>Scan the QR Code with Your Phone</h1>
+                <img src="https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=%s" alt="QR Code">
+            </body>
+            </html>
+        `
+
+		// Replace the placeholder with the URL-encoded QR code data
+		c.Header("Content-Type", "text/html")
+		c.String(http.StatusOK, fmt.Sprintf(html, encodedQRCode))
+
+	case "timeout":
+		c.JSON(http.StatusRequestTimeout, gin.H{"error": "QR code timed out"})
+
+	case "login":
+		// Log the entire qrCode object to inspect its structure
+		fmt.Printf("QR Code Event: %+v\n", qrCode)
+
+		// Assuming the library automatically manages the session
+		if client.Store != nil && client.Store.ID != nil {
+			c.JSON(http.StatusOK, gin.H{"message": "Login successful"})
+		} else {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve session data"})
+		}
 	}
 }
 
@@ -346,23 +359,8 @@ func initClient() {
 	}
 }
 
-func loadMessagesFromDB() {
-	// Load previously received messages from the database or any other persistent storage
-	// For simplicity, we'll assume messages are stored in memory (receivedMessages slice)
-	// You can extend this to fetch messages from the database if needed.
-	messagesMutex.Lock()
-	defer messagesMutex.Unlock()
-
-	if len(receivedMessages) == 0 {
-		log.Println("No previous messages found in memory.")
-	} else {
-		log.Printf("Loaded %d previous messages from memory.", len(receivedMessages))
-	}
-}
-
 func main() {
 	initClient()
-	loadMessagesFromDB()
 	db = initDatabase()
 	defer db.Close()
 
