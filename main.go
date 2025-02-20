@@ -34,6 +34,11 @@ var upgrader = websocket.Upgrader{
 var wsClients = make(map[*websocket.Conn]bool)
 var wsMutex sync.Mutex
 
+type Request struct {
+	Recipient string `json:"recipient"`
+	Message   string `json:"message"`
+}
+
 func initDatabase() *sql.DB {
 	db, err := sql.Open("sqlite3", "file:whatsapp.db?_foreign_keys=on")
 	if err != nil {
@@ -57,13 +62,62 @@ func initDatabase() *sql.DB {
 	return db
 }
 
-func handleIncomingMessage(evt *events.Message) {
-	loc, _ := time.LoadLocation("Asia/Jakarta") // UTC+7 timezone
-	timestampUTC7 := evt.Info.Timestamp.In(loc).String()
+func sendMessage(c *gin.Context) {
+	var request Request
 
-	// Extract message details
-	sender := evt.Info.Sender.String()
-	message := evt.Message.GetConversation()
+	// Bind JSON payload to the request struct
+	if err := c.ShouldBindJSON(&request); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request payload"})
+		return
+	}
+
+	// Parse recipient JID
+	recipientJID, ok := parseJID(request.Recipient)
+	if !ok {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid recipient JID"})
+		return
+	}
+
+	// Send message
+	msg := &waProto.Message{
+		Conversation: proto.String(request.Message),
+	}
+	resp, err := client.SendMessage(context.Background(), recipientJID, msg)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to send message: %v", err)})
+		return
+	}
+
+	// Handle incoming message (store in DB and broadcast)
+	handleIncomingMessage(request)
+
+	// Respond with success
+	c.JSON(http.StatusOK, gin.H{"message": "Message sent successfully", "response": resp})
+}
+
+func handleIncomingMessage(input interface{}) {
+	loc, _ := time.LoadLocation("Asia/Jakarta") // UTC+7 timezone
+
+	var sender, message, timestampUTC7 string
+
+	switch v := input.(type) {
+	case *events.Message:
+		// Handle events.Message case
+		timestampUTC7 = v.Info.Timestamp.In(loc).String()
+		sender = v.Info.Sender.String()
+		message = v.Message.GetConversation()
+
+	case Request:
+		// Handle Request case
+		timestampUTC7 = time.Now().In(loc).String()
+		sender = "6285123945816@s.whatsapp.net"
+		message = v.Message
+		log.Printf("Sender: %s, Message: %s", sender, message)
+
+	default:
+		log.Printf("Unsupported input type: %T", input)
+		return
+	}
 
 	// Insert or replace the message in the database
 	_, err := db.Exec(`
@@ -207,38 +261,6 @@ func scanQR(c *gin.Context) {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve session data"})
 		}
 	}
-}
-
-func sendMessage(c *gin.Context) {
-	var request struct {
-		Recipient string `json:"recipient"`
-		Message   string `json:"message"`
-	}
-
-	if err := c.ShouldBindJSON(&request); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request payload"})
-		return
-	}
-
-	// Parse recipient JID
-	recipientJID, ok := parseJID(request.Recipient)
-	if !ok {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid recipient JID"})
-		return
-	}
-
-	// Send message
-	msg := &waProto.Message{
-		Conversation: proto.String(request.Message),
-	}
-
-	resp, err := client.SendMessage(context.Background(), recipientJID, msg)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("Failed to send message: %v", err)})
-		return
-	}
-
-	c.JSON(http.StatusOK, gin.H{"message": "Message sent successfully", "response": resp})
 }
 
 func getGroup(c *gin.Context) {
