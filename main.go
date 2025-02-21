@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 	"log"
 	"net/http"
@@ -14,6 +13,7 @@ import (
 	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
+	_ "github.com/lib/pq" // PostgreSQL driver
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/mdp/qrterminal"
 	"go.mau.fi/whatsmeow"
@@ -22,10 +22,13 @@ import (
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
 	"google.golang.org/protobuf/proto"
+	"gorm.io/driver/postgres"
+	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 var client *whatsmeow.Client
-var db *sql.DB
+var db *gorm.DB
 var upgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool {
 		return true // Allow all origins (you can customize this for security)
@@ -39,24 +42,24 @@ type Request struct {
 	Message   string `json:"message"`
 }
 
-func initDatabase() *sql.DB {
-	db, err := sql.Open("sqlite3", "file:whatsapp.db?_foreign_keys=on")
+type Message struct {
+	ID        uint   `gorm:"primaryKey"`
+	Sender    string `gorm:"not null"`
+	Message   string `gorm:"not null"`
+	Timestamp string `gorm:"not null;uniqueIndex:idx_sender_message_timestamp"`
+}
+
+func initDatabase() *gorm.DB {
+	dsn := "host=100.81.120.54 port=5432 user=root password=kambin dbname=wa_lib sslmode=disable"
+	var err error
+	db, err = gorm.Open(postgres.Open(dsn), &gorm.Config{})
 	if err != nil {
 		log.Fatalf("Error opening database: %v", err)
 	}
 
-	// Create the messages table with a unique constraint to prevent duplicates
-	_, err = db.Exec(`
-        CREATE TABLE IF NOT EXISTS messages (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            sender TEXT NOT NULL,
-            message TEXT NOT NULL,
-            timestamp TEXT NOT NULL,
-            UNIQUE(sender, message, timestamp)
-        )
-    `)
+	err = db.AutoMigrate(&Message{})
 	if err != nil {
-		log.Fatalf("Error creating messages table: %v", err)
+		log.Fatalf("Error migrating database: %v", err)
 	}
 
 	return db
@@ -96,19 +99,16 @@ func sendMessage(c *gin.Context) {
 }
 
 func handleIncomingMessage(input interface{}) {
-	loc, _ := time.LoadLocation("Asia/Jakarta") // UTC+7 timezone
-
+	loc, _ := time.LoadLocation("Asia/Jakarta")
 	var sender, message, timestampUTC7 string
 
 	switch v := input.(type) {
 	case *events.Message:
-		// Handle events.Message case
 		timestampUTC7 = v.Info.Timestamp.In(loc).String()
 		sender = v.Info.Sender.String()
 		message = v.Message.GetConversation()
 
 	case Request:
-		// Handle Request case
 		timestampUTC7 = time.Now().In(loc).String()
 		sender = "6285123945816@s.whatsapp.net"
 		message = v.Message
@@ -119,17 +119,22 @@ func handleIncomingMessage(input interface{}) {
 		return
 	}
 
-	// Insert or replace the message in the database
-	_, err := db.Exec(`
-        INSERT OR REPLACE INTO messages (id, sender, message, timestamp)
-        VALUES ((SELECT id FROM messages WHERE sender = ? AND message = ?), ?, ?, ?)
-    `, sender, message, sender, message, timestampUTC7)
-	if err != nil {
-		log.Printf("Error inserting or replacing message in database: %v", err)
+	msg := Message{
+		Sender:    sender,
+		Message:   message,
+		Timestamp: timestampUTC7,
+	}
+
+	result := db.Clauses(clause.OnConflict{
+		Columns:   []clause.Column{{Name: "sender"}, {Name: "message"}, {Name: "timestamp"}},
+		UpdateAll: true,
+	}).Create(&msg)
+
+	if result.Error != nil {
+		log.Printf("Error inserting or updating message in database: %v", result.Error)
 		return
 	}
 
-	// Broadcast the message to WebSocket clients
 	broadcastMessage(map[string]string{
 		"sender":    sender,
 		"message":   message,
@@ -298,41 +303,27 @@ func getGroup(c *gin.Context) {
 }
 
 func receiveMessage(c *gin.Context) {
-	// Query the database for all messages
-	rows, err := db.Query("SELECT sender, message, timestamp FROM messages ORDER BY timestamp ASC")
-	if err != nil {
+	var messages []Message
+
+	result := db.Order("timestamp ASC").Find(&messages)
+	if result.Error != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch messages from database"})
 		return
 	}
-	defer rows.Close()
 
-	// Parse the results into a slice of maps
-	var messages []map[string]string
-	for rows.Next() {
-		var sender, message, timestamp string
-		err := rows.Scan(&sender, &message, &timestamp)
-		if err != nil {
-			log.Printf("Error scanning row: %v", err)
-			continue
-		}
-		messages = append(messages, map[string]string{
-			"sender":    sender,
-			"message":   message,
-			"timestamp": timestamp,
+	var messageList []map[string]string
+	for _, msg := range messages {
+		messageList = append(messageList, map[string]string{
+			"sender":    msg.Sender,
+			"message":   msg.Message,
+			"timestamp": msg.Timestamp,
 		})
 	}
 
-	// Check for errors during iteration
-	if err := rows.Err(); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Error iterating over messages"})
-		return
-	}
-
-	// Return the messages as JSON
-	if len(messages) == 0 {
+	if len(messageList) == 0 {
 		c.JSON(http.StatusOK, gin.H{"message": "No received messages"})
 	} else {
-		c.JSON(http.StatusOK, gin.H{"received_messages": messages})
+		c.JSON(http.StatusOK, gin.H{"received_messages": messageList})
 	}
 }
 
@@ -384,8 +375,6 @@ func initClient() {
 func main() {
 	initClient()
 	db = initDatabase()
-	defer db.Close()
-
 	router := gin.Default()
 
 	// Configure CORS middleware
